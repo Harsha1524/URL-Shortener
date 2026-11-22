@@ -2,7 +2,7 @@
 
 Node.js / Express · PostgreSQL · Redis · BullMQ
 
-**Live demo:** _add your Render URL here_
+**Live demo:** https://url-shortener-lthf.onrender.com (free tier: first load after a quiet spell takes ~30–60 s)
 
 - **Base62 short codes** generated from the database id (no collisions, no retries)
 - **Redis cache-aside** on the redirect path, with negative caching for unknown codes
