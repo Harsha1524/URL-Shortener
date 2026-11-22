@@ -1,0 +1,37 @@
+# Starts the two infrastructure pieces the app needs.
+#   docker compose up -d      -> start
+#   docker compose down       -> stop (data kept)
+#   docker compose down -v    -> stop and wipe data
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shortener
+      POSTGRES_PASSWORD: shortener
+      POSTGRES_DB: shortener
+    ports:
+      - "127.0.0.1:5432:5432"   # only reachable from your own machine, not your Wi-Fi network
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shortener -d shortener"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # noeviction: never silently delete keys when memory is full (BullMQ queue data must not vanish)
+    # appendonly: write changes to disk so queued jobs survive a Redis restart
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:
