@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>URL Shortener — caching, rate limiting & async analytics</title>
+<meta name="description" content="A URL shortener built with Node.js, Express, PostgreSQL, Redis and BullMQ.">
+<style>
+  :root {
+    --bg: #f6f5f1; --card: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #e3e1d9;
+    --accent: #2f5d50; --accent-ink: #ffffff; --accent-soft: #e4efe9;
+    --warn: #8a4b0f; --warn-soft: #fbefdc; --err: #9b2c2c; --err-soft: #fbe9e9;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --card: #1e1e1c; --ink: #ecebe6; --muted: #a09f98; --line: #34332f;
+      --accent: #7fbfa8; --accent-ink: #10201b; --accent-soft: #1f2e29;
+      --warn: #f0c27b; --warn-soft: #33281a; --err: #f0a0a0; --err-soft: #352020;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 20px 64px; }
+  h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 6px; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 14px; text-transform: none; }
+  p.lead { color: var(--muted); margin: 0 0 18px; max-width: 640px; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 32px; }
+  .tag { font: 12px var(--mono); padding: 3px 9px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); background: var(--card); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px; margin-bottom: 18px; }
+  form { display: flex; gap: 10px; flex-wrap: wrap; }
+  input[type=url] { flex: 1 1 380px; font: inherit; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); }
+  input[type=url]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button { font: inherit; font-weight: 600; padding: 12px 18px; border-radius: 10px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .6; cursor: wait; }
+  .msg { margin-top: 12px; padding: 10px 12px; border-radius: 10px; font-size: 14px; display: none; }
+  .msg.err { display: block; background: var(--err-soft); color: var(--err); }
+  .msg.warn { display: block; background: var(--warn-soft); color: var(--warn); }
+  .result { display: none; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
+  .short { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .short a { font: 20px var(--mono); color: var(--accent); word-break: break-all; }
+  .small { font-size: 13px; color: var(--muted); }
+  .long { font-size: 13px; color: var(--muted); word-break: break-all; margin-top: 4px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .stat { background: var(--bg); border-radius: 10px; padding: 12px 14px; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat .v { font: 22px var(--mono); margin-top: 2px; }
+  .bars { display: flex; align-items: flex-end; gap: 6px; height: 70px; margin-top: 10px; }
+  .bar { flex: 1; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 3px; position: relative; }
+  .bar span { position: absolute; bottom: -18px; left: 0; right: 0; text-align: center; font-size: 10px; color: var(--muted); }
+  ul.ref { list-style: none; padding: 0; margin: 26px 0 0; font-size: 14px; }
+  ul.ref li { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+  ol.flow { margin: 0; padding-left: 20px; color: var(--muted); font-size: 14px; }
+  ol.flow b { color: var(--ink); font-weight: 600; }
+  code { font: 13px var(--mono); background: var(--bg); padding: 1px 5px; border-radius: 5px; }
+  footer { margin-top: 30px; font-size: 13px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
+  footer a { color: var(--accent); }
+  .pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; animation: p 1.6s infinite; }
+  @keyframes p { 50% { opacity: .25; } }
+  @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>URL Shortener</h1>
+  <p class="lead">Paste a long link, get a short one. Behind the page: Base62 codes from database IDs, a Redis cache on the redirect path, per-IP rate limiting, and click analytics processed asynchronously by a job queue.</p>
+  <div class="tags">
+    <span class="tag">Node.js</span><span class="tag">Express</span><span class="tag">PostgreSQL</span>
+    <span class="tag">Redis</span><span class="tag">BullMQ</span><span class="tag">Base62</span>
+  </div>
+
+  <section class="card">
+    <h2>Shorten a link</h2>
+    <form id="form">
+      <input id="url" type="url" required placeholder="https://example.com/a/very/long/link" autocomplete="off">
+      <button id="go" type="submit">Shorten</button>
+    </form>
+    <div id="msg" class="msg"></div>
+    <div id="result" class="result">
+      <div class="short">
+        <a id="shortUrl" href="#" target="_blank" rel="noopener"></a>
+        <button class="ghost" id="copy" type="button">Copy</button>
+      </div>
+      <div class="long" id="longUrl"></div>
+      <div class="small" id="expiry"></div>
+    </div>
+  </section>
+
+  <section class="card" id="statsCard" style="display:none">
+    <h2><span class="pulse"></span>Live analytics for <code id="statsCode"></code></h2>
+    <div class="grid">
+      <div class="stat"><div class="k">Total clicks</div><div class="v" id="clicks">0</div></div>
+      <div class="stat"><div class="k">Created</div><div class="v" id="created" style="font-size:15px">–</div></div>
+    </div>
+    <div class="bars" id="bars"></div>
+    <ul class="ref" id="refs"></ul>
+    <p class="small" style="margin:14px 0 0">Open your short link in a new tab. The click is recorded by a background worker, so the count updates a moment later.</p>
+  </section>
+
+  <section class="card">
+    <h2>Under the hood (live)</h2>
+    <div class="grid">
+      <div class="stat"><div class="k">Cache hit rate</div><div class="v" id="hitRate">–</div></div>
+      <div class="stat"><div class="k">Cache hits / misses</div><div class="v" id="hm">–</div></div>
+      <div class="stat"><div class="k">Jobs waiting in queue</div><div class="v" id="qWait">–</div></div>
+      <div class="stat"><div class="k">Clicks processed</div><div class="v" id="qDone">–</div></div>
+      <div class="stat"><div class="k">Shortens left this minute</div><div class="v" id="rl">–</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>What happens when you click a short link</h2>
+    <ol class="flow">
+      <li><b>Rate limiter</b>: a Lua script in Redis counts requests per IP per window, atomically.</li>
+      <li><b>Cache lookup</b>: Redis is checked first; only on a miss does the server query Postgres, then it caches the result with a TTL.</li>
+      <li><b>302 redirect</b> is sent right away. A 302, not a 301, so browsers don't cache it and every click is counted.</li>
+      <li><b>Analytics job</b> is pushed to a BullMQ queue; a worker writes the click to Postgres in a transaction, off the redirect path.</li>
+      <li><b>If Redis goes down</b>, redirects fall back to Postgres; creating links pauses (fail-closed) so the rate limit can't be bypassed.</li>
+    </ol>
+  </section>
+
+  <footer id="footer">
+    <span id="note">Hosted on a free tier: the first request after a quiet period can take ~30–60 s while the server wakes up.</span>
+  </footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let currentCode = null;
+let statsTimer = null;
+
+function showMsg(text, kind) {
+  const el = $('msg');
+  el.textContent = text;
+  el.className = 'msg ' + (kind || '');
+}
+
+async function loadInfo() {
+  try {
+    const info = await (await fetch('/api/info')).json();
+    const f = $('footer');
+    if (info.sourceUrl) f.insertAdjacentHTML('afterbegin', `<a href="${encodeURI(info.sourceUrl)}" target="_blank" rel="noopener">Source code</a>`);
+    if (info.authorName) {
+      const name = info.authorName.replace(/[<>&"]/g, '');
+      f.insertAdjacentHTML('afterbegin', info.authorUrl
+        ? `<span>Built by <a href="${encodeURI(info.authorUrl)}" target="_blank" rel="noopener">${name}</a></span>`
+        : `<span>Built by ${name}</span>`);
+    }
+    if (info.linkTtlDays > 0) $('note').textContent += ` Demo links expire after ${info.linkTtlDays} days.`;
+  } catch {}
+}
+
+$('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const url = $('url').value.trim();
+  if (!url) return showMsg('Enter a URL first.', 'err');
+  $('go').disabled = true;
+  $('go').textContent = 'Shortening…';
+  showMsg('');
+  try {
+    const res = await fetch('/api/shorten', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const remaining = res.headers.get('X-RateLimit-Remaining');
+    if (remaining !== null) $('rl').textContent = remaining;
+    const data = await res.json();
+    if (res.status === 429) return showMsg(`Rate limit reached. That's the limiter working. Try again in ${data.retryAfterSeconds}s.`, 'warn');
+    if (!res.ok) return showMsg(data.error || 'Something went wrong.', 'err');
+
+    $('shortUrl').textContent = data.shortUrl;
+    $('shortUrl').href = data.shortUrl;
+    $('longUrl').textContent = '→ ' + data.longUrl;
+    $('expiry').textContent = data.expiresAt ? 'Expires ' + new Date(data.expiresAt).toLocaleDateString() : '';
+    $('result').style.display = 'block';
+    $('url').value = '';
+    watchStats(data.shortCode);
+    loadMetrics();
+  } catch {
+    showMsg('Could not reach the server. If it was asleep, wait a few seconds and try again.', 'err');
+  } finally {
+    $('go').disabled = false;
+    $('go').textContent = 'Shorten';
+  }
+});
+
+$('copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('shortUrl').textContent);
+    $('copy').textContent = 'Copied';
+    setTimeout(() => ($('copy').textContent = 'Copy'), 1500);
+  } catch {}
+});
+
+function watchStats(code) {
+  currentCode = code;
+  $('statsCode').textContent = code;
+  $('statsCard').style.display = 'block';
+  clearInterval(statsTimer);
+  loadStats();
+  let ticks = 0;
+  statsTimer = setInterval(() => { loadStats(); loadMetrics(); if (++ticks > 100) clearInterval(statsTimer); }, 3000);
+}
+
+async function loadStats() {
+  if (!currentCode) return;
+  try {
+    const s = await (await fetch(`/api/urls/${currentCode}/stats`)).json();
+    if (s.error) return;
+    $('clicks').textContent = s.totalClicks;
+    $('created').textContent = new Date(s.createdAt).toLocaleString();
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+      const found = s.last7Days.find((x) => x.day === d);
+      days.push({ d, c: found ? found.clicks : 0 });
+    }
+    const max = Math.max(1, ...days.map((x) => x.c));
+    $('bars').innerHTML = days.map((x) =>
+      `<div class="bar" title="${x.d}: ${x.c} clicks" style="height:${(x.c / max) * 100}%"><span>${x.d.slice(5)}</span></div>`).join('');
+    $('refs').innerHTML = s.topReferers.map((r) => {
+      const label = r.referer.replace(/[<>&"]/g, '').slice(0, 60);
+      return `<li><span>${label}</span><span>${r.clicks}</span></li>`;
+    }).join('');
+  } catch {}
+}
+
+async function loadMetrics() {
+  try {
+    const m = await (await fetch('/api/metrics')).json();
+    $('hitRate').textContent = Math.round(m.cache.hitRate * 100) + '%';
+    $('hm').textContent = `${m.cache.hits} / ${m.cache.misses}`;
+    if (m.clickQueue) {
+      $('qWait').textContent = m.clickQueue.waiting + m.clickQueue.active;
+      $('qDone').textContent = m.clickQueue.completed;
+    }
+  } catch {}
+}
+
+loadInfo();
+loadMetrics();
+setInterval(loadMetrics, 10000);
+</script>
+</body>
+</html>
