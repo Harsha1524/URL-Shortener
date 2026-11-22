@@ -1,0 +1,45 @@
+# Render Blueprint: creates the web service + a Redis-compatible Key Value store.
+# Postgres comes from Neon (free, doesn't expire) — paste its URL when Render asks.
+# See DEPLOY.md for the step-by-step guide.
+services:
+  - type: web
+    name: url-shortener
+    runtime: node
+    plan: free
+    region: singapore          # closest to India; must match the Key Value region
+    buildCommand: npm ci
+    startCommand: npm run migrate && npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        sync: false            # Render will prompt you for this (your Neon connection string)
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: url-shortener-redis
+          property: connectionString
+      - key: RUN_WORKER_IN_PROCESS
+        value: "true"          # free plan = one process, so the worker runs inside the API
+      - key: LINK_TTL_DAYS
+        value: "7"             # public demo: links expire after a week
+      - key: RATE_LIMIT_SHORTEN_MAX
+        value: "10"
+      - key: RATE_LIMIT_REDIRECT_MAX
+        value: "60"
+      - key: TRUST_PROXY
+        value: "true"          # Render sits behind a proxy; needed for real client IPs
+      - key: AUTHOR_NAME
+        sync: false
+      - key: AUTHOR_URL
+        sync: false
+      - key: SOURCE_URL
+        sync: false
+
+  - type: keyvalue
+    name: url-shortener-redis
+    plan: free
+    region: singapore
+    maxmemoryPolicy: noeviction  # never drop queue data silently
+    ipAllowList: []              # only reachable from your Render services
